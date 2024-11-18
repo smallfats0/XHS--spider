@@ -1,102 +1,111 @@
+import os
 import time
-import csv
 import requests
+import random
+import json
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.edge.options import Options
 from lxml import etree
+import pandas as pd
+from faker import Faker
 
-# 设置请求头，模拟浏览器访问
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36'
-}
+# 初始化 Faker 用于生成随机请求头
+fake = Faker()
 
-# 启动 Selenium WebDriver 并访问探索页
-driver = webdriver.Chrome()
-driver.get('https://www.xiaohongshu.com/explore')
-time.sleep(5)  # 等待页面加载
+# 使用 Faker 生成随机请求头
+def get_random_headers():
+    headers = {
+        "User-Agent": fake.user_agent(),
+        "X-Forwarded-For": fake.ipv4(),
+        "Accept-Language": fake.language_code(),
+    }
+    return headers
 
-# 尝试关闭弹窗（可选）
-try:
-    close_button_xpath = '//*[@id="app"]/div[1]/div/div[1]/div[1]/svg'
-    close_button = driver.find_element(By.XPATH, close_button_xpath)
-    driver.execute_script("arguments[0].click();", close_button)
-    print("弹窗已关闭")
-    time.sleep(2)
-except Exception as e:
-    print("未找到弹窗或关闭按钮:", e)
+# 读取代理池文件
+with open('ip代理池.json', 'r', encoding='utf-8') as f:
+    proxies = json.load(f)
 
-# 设置要获取的用户id
-n = 10
+# 随机选择代理
+def get_random_proxy():
+    return random.choice(proxies)
 
+# 检查并关闭弹窗函数
+def check_and_close_popup(driver):
+    try:
+        close_button_xpath = '//*[@id="app"]/div[1]/div/div[1]/div[1]/svg'
+        close_button = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, close_button_xpath))
+        )
+        driver.execute_script("arguments[0].click();", close_button)
+        print("弹窗已关闭")
+        time.sleep(5)  # 给页面更多时间加载
+    except Exception:
+        print("未找到弹窗或关闭按钮")
 
-# 打开 CSV 文件进行写入
-with open('XHS.csv', mode='w', encoding='utf-8', newline='') as file:
-    writer = csv.writer(file)
-    writer.writerow(['用户主页链接', '用户ID'])  # 写入表头
+# 下拉到页面底部函数
+def scroll_to_load(driver, n, items_per_scroll=8, delay=2):
+    if n <= items_per_scroll:
+        scroll_times = 1
+    else:
+        scroll_times = (n // items_per_scroll) + (1 if n % items_per_scroll != 0 else 0)
 
-    # 遍历前 10 个主页链接进行测试
-    for index in range(1, n + 1):
-        home_link_xpath = f'//*[@id="exploreFeeds"]/section[{index}]/div/div/div/a'
+    for i in range(scroll_times):
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        print(f"页面下拉 {i + 1}/{scroll_times} 次...")
+        time.sleep(delay)
+
+# 启动 Selenium WebDriver 并访问小红书探索页（增加代理支持）
+def open_explore_page(driver, url, n):
+    retries = 3
+    for attempt in range(retries):
         try:
-            # 获取主页链接的 href 属性
-            home_link = driver.find_element(By.XPATH, home_link_xpath)
-            home_link_url = home_link.get_attribute("href")
-            print(f"获取到主页链接: {home_link_url}")
+            driver.get(url)
+            time.sleep(3)  # 等待页面加载完成
+            check_and_close_popup(driver)
+            scroll_to_load(driver, n)  # 动态下拉页面
+            return
+        except Exception:
+            print(f"尝试打开探索页失败，重试 {attempt + 1}/{retries} 次...")
 
-            # 使用 requests 获取主页链接的内容
-            response = requests.get(home_link_url, headers=headers)
-            if response.status_code == 200:
-                # 解析 HTML 内容
-                user_page = etree.HTML(response.text)
+# 主程序
+if __name__ == "__main__":
+    # 设置 Edge 浏览器代理
+    random_proxy = get_random_proxy()
+    proxy_ip = random_proxy["http"].replace("http://", "")
+    print(f"使用代理: {proxy_ip}")
 
-                # 判断是否为广告
-                ad_keywords = ["广告", "推广", "sponsored"]  # 自定义广告关键词
-                page_text = ''.join(user_page.xpath('//text()'))  # 提取页面所有文本内容
-                if any(keyword in page_text for keyword in ad_keywords):
-                    print(f"跳过广告主页: {home_link_url}")
-                    continue
+    edge_options = Options()
+    edge_options.add_argument(f"--proxy-server=http://{proxy_ip}")
+    edge_options.add_argument("--headless")  # 无头模式
+    edge_options.add_argument("--disable-gpu")
 
-                # 使用指定 XPath 提取用户 ID
-                user_id_xpath = '//*[@id="userPageContainer"]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/span[1]'
-                user_id_element = user_page.xpath(user_id_xpath)
-                if user_id_element:
-                    user_id = user_id_element[0].text.strip()
-                    print(f"获取到用户ID: {user_id}")
-                    # 写入 CSV 文件
-                    writer.writerow([home_link_url, user_id])
-                else:
-                    print("未找到用户ID，页面可能未完全加载。")
-            else:
-                print(f"请求失败，状态码: {response.status_code}")
+    # 初始化 WebDriver
+    driver = webdriver.Edge(options=edge_options)
 
-            time.sleep(3)  # 每次请求后暂停 3 秒
+    # 示例 URL 和帖子数量
+    url = "https://www.example.com"  # 替换为目标网址
+    post_count = 20
 
-        except Exception as e:
-            print(f"处理第 {index} 个主页链接时出现错误: {e}")
+    try:
+        open_explore_page(driver, url, post_count)
+        print("页面加载完成！")
+    except Exception as e:
+        print(f"页面加载失败: {e}")
+    finally:
+        driver.quit()
+    
+    # 使用 requests 测试代理
+    try:
+        random_proxy = get_random_proxy()
+        proxy_dict = {"http": random_proxy["http"], "https": random_proxy["http"]}
+        headers = get_random_headers()
 
-# 关闭浏览器
-driver.quit()
-
-import pandas as pd
-# 读取 CSV 文件
-df = pd.read_csv('XHS.csv')
-
-# 删除“用户主页链接”列
-df = df.drop(columns=['用户主页链接'])
-
-# 去重“用户ID”列
-df = df.drop_duplicates(subset=['用户ID'])
-
-# 保存去重后的结果到新文件
-import pandas as pd
-
-# 读取 CSV 文件
-df = pd.read_csv('XHS_user_data.csv')
-
-# 去重，仅保留用户ID列
-df = df.drop_duplicates(subset=['用户ID'])[['用户ID']]
-
-# 保存去重后的结果到 CSV 文件
-df.to_csv('XHS_user_data.csv', index=False)
-print("已去重并保存，仅保留用户ID。")
-
+        response = requests.get("https://httpbin.org/ip", headers=headers, proxies=proxy_dict, timeout=10)
+        print("请求成功，返回内容:")
+        print(response.json())
+    except Exception as e:
+        print(f"请求失败: {e}")
